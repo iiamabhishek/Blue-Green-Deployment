@@ -1,0 +1,106 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'DEPLOY_ENV', choices: ['blue', 'green'], description: 'Choose which environment to deploy: Blue or Green')
+        choice(name: 'DOCKER_TAG', choices: ['blue', 'green'], description: 'Choose the Docker image tag for the deployment')
+        booleanParam(name: 'SWITCH_TRAFFIC', defaultValue: false, description: 'Switch traffic between Blue and Green')
+    }
+
+    tools{
+        maven 'maven3'
+    }
+    environment {
+        IMAGE_NAME = "iiamabhishek05/bankapp"
+        TAG = "${params.DOCKER_TAG}"  // The image tag now comes from the parameter
+        SCANNER_HOME = tool "sonarqube"
+        KUBE_NAMESPACE = 'webapps'
+    }
+
+    stages {
+
+        stage(' Git Checkout') {
+            steps {
+                git branch: 'main', credentialsId: 'github', url: 'https://github.com/iiamabhishek/Blue-Green-Deployment.git'
+            }
+        }
+
+        // stage('SonarQube Analysis') {
+        //     steps {
+        //         withSonarQubeEnv('sonarqube') {
+        //             sh "$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectKey=nodejsmysql -Dsonar.projectName=nodejsmysql -Dsonar.java.binaries=target/classes -X"
+        //         }
+        //     }
+        // }
+
+        // stage('Quality Gate Check') {  
+        //     steps {  
+        //        timeout(time: 1, unit: 'HOURS') {
+        //              waitForQualityGate abortPipeline: true
+        //         }
+        //     }  
+        // }
+
+        
+        stage('Build Artifacts') {  
+            steps {  
+                  sh 'mvn package -DskipTests=true'
+            }  
+        }
+       
+        // stage('Trivy FS Scan') {  
+        //     steps {  
+        //         sh 'trivy fs --format table -o fs.html .'
+        //     }  
+        // }
+
+        stage('Docker Build and Tag Image') {  
+            steps {  
+                withDockerRegistry(credentialsId: 'docker', url: 'https://index.docker.io/v1/') {
+                    sh 'docker build -t ${IMAGE_NAME}:${TAG} .'
+                }
+            }  
+        }
+
+        // stage('Trivy Image Scan') {
+        //     steps {
+        //         sh "trivy image --format table -o image.html ${IMAGE_NAME}:${TAG}"
+        //     }
+        // }
+
+        
+        stage('Docker Push Image') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker') {
+                        sh "docker push ${IMAGE_NAME}:${TAG}"
+                    }
+                }
+            }
+        }
+
+        stage('Deploy MySQL Deployment and Service') {
+            steps {
+                script {
+                    withKubeConfig(caCertificate: '', clusterName: 'kind', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://127.0.0.1:43481') {
+                        sh "kubectl apply -f mysql-ds.yml -n ${KUBE_NAMESPACE}"  // Ensure you have the MySQL deployment YAML ready
+                    }
+                }
+            }
+        }
+
+        stage('Deploy SVC-APP') {
+            steps {
+                script {
+                    withKubeConfig(caCertificate: '', clusterName: 'kind', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://127.0.0.1:43481') {
+                        sh """ if ! kubectl get svc bankapp-service -n ${KUBE_NAMESPACE}; then
+                                kubectl apply -f bankapp-service.yml -n ${KUBE_NAMESPACE}
+                                
+                              fi
+                        """
+                   }
+                }
+            }
+        }
+    }
+}
